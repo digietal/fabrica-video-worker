@@ -2,27 +2,9 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.request import Request, urlopen
 
-from worker.supabase import supabase
-
-
-def get_asset(asset_id: str):
-    response = (
-        supabase
-        .table("assets")
-        .select(
-            "id, owner_id, project_id, kind, code, file_name, "
-            "storage_path, mime_type, source_hash"
-        )
-        .eq("id", asset_id)
-        .single()
-        .execute()
-    )
-
-    if not response.data:
-        raise RuntimeError(f"Asset não encontrado: {asset_id}")
-
-    return response.data
+from worker.gateway import complete_job, storage_url
 
 
 def probe_video(file_path: str):
@@ -45,107 +27,126 @@ def probe_video(file_path: str):
     )
 
     if result.returncode != 0:
-        raise RuntimeError(
-            f"ffprobe falhou:\n{result.stderr}"
-        )
+        raise RuntimeError(f"ffprobe falhou: {result.stderr}")
 
     data = json.loads(result.stdout)
 
     streams = data.get("streams", [])
+
     video = next(
         (stream for stream in streams if stream.get("codec_type") == "video"),
         None,
     )
+
     audio = next(
         (stream for stream in streams if stream.get("codec_type") == "audio"),
         None,
     )
 
-    metadata = {
-        "duration": float(
-            data.get("format", {}).get("duration", 0)
-        ),
+    return {
+        "duration": float(data.get("format", {}).get("duration", 0)),
         "width": video.get("width") if video else None,
         "height": video.get("height") if video else None,
         "video_codec": video.get("codec_name") if video else None,
         "audio_codec": audio.get("codec_name") if audio else None,
-        "video_fps": (
-            video.get("r_frame_rate")
-            if video
-            else None
-        ),
+        "video_fps": video.get("r_frame_rate") if video else None,
     }
 
-    return metadata
 
-
-def download_asset(storage_path: str, destination: Path):
-    data = (
-        supabase
-        .storage
-        .from_("fabrica")
-        .download(storage_path)
+def download_signed_url(url: str, destination: Path):
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "fabrica-video-worker/1.0"
+        },
     )
 
-    destination.write_bytes(data)
+    with urlopen(request, timeout=60) as response:
+        destination.write_bytes(response.read())
 
 
 def process_ingest(job: dict):
     payload = job.get("payload") or {}
+
     asset_id = payload.get("asset_id")
+    storage_path = payload.get("storage_path")
 
     if not asset_id:
         raise RuntimeError(
             f"INGEST sem asset_id. Job: {job['id']}"
         )
 
-    asset = get_asset(asset_id)
+    if not storage_path:
+        raise RuntimeError(
+            f"INGEST sem storage_path. Job: {job['id']}"
+        )
+
+    signed = storage_url(
+        "download",
+        storage_path,
+    )
+
+    url = signed.get("url")
+
+    if not url:
+        raise RuntimeError(
+            "Gateway não retornou URL assinada de download."
+        )
+
+    file_name = (
+        payload.get("file_name")
+        or Path(storage_path).name
+        or f"{asset_id}.mp4"
+    )
 
     with tempfile.TemporaryDirectory(
         prefix=f"fabrica_ingest_{job['id']}_"
     ) as temp_dir:
 
-        input_path = Path(temp_dir) / asset["file_name"]
+        input_path = Path(temp_dir) / file_name
 
         print(
-            f"📥 Baixando asset {asset['id']} "
-            f"de fabrica/{asset['storage_path']}"
+            f"📥 Baixando asset autorizado: "
+            f"{storage_path}"
         )
 
-        download_asset(
-            asset["storage_path"],
+        download_signed_url(
+            url,
             input_path,
         )
 
-        print(f"🔎 Executando ffprobe em {input_path}")
-
-        metadata = probe_video(str(input_path))
-
-    artifact = {
-        "owner_id": job["owner_id"],
-        "production_run_id": job["production_run_id"],
-        "kind": "INGEST",
-        "cache_key": job["cache_key"],
-        "storage_path": asset["storage_path"],
-        "thumbnail_path": None,
-        "metadata": metadata,
-    }
-
-    response = (
-        supabase
-        .table("artifacts")
-        .insert(artifact)
-        .execute()
-    )
-
-    if not response.data:
-        raise RuntimeError(
-            "Não foi possível criar o artifact de INGEST."
+        print(
+            f"🔎 Executando ffprobe em {input_path}"
         )
 
-    print(
-        f"✅ INGEST concluído: job={job['id']} "
-        f"artifact={response.data[0]['id']}"
+        metadata = probe_video(
+            str(input_path)
+        )
+
+    result = {
+        "artifacts": [
+            {
+                "kind": "INGEST",
+                "storage_path": storage_path,
+                "thumbnail_path": None,
+                "cache_key": job.get("cache_key"),
+                "metadata": metadata,
+            }
+        ],
+        "metadata": {
+            "asset_id": asset_id,
+            "probe": metadata,
+        },
+    }
+
+    response = complete_job(
+        job["id"],
+        result,
     )
 
-    return response.data[0]
+    print(
+        f"✅ INGEST concluído via Gateway: "
+        f"{response}"
+    )
+
+    return response
