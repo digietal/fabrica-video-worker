@@ -1,12 +1,13 @@
 import os
 
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+GATEWAY_URL = os.getenv(
+    "GATEWAY_URL",
+    "https://fabricadigietal.lovable.app/api/public/worker",
+).rstrip("/")
+
+WORKER_SECRET_TOKEN = os.getenv("WORKER_SECRET_TOKEN")
 
 
-if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL não configurada")
-
-if not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY não configurada")
+if not WORKER_SECRET_TOKEN:
+    raise RuntimeError("WORKER_SECRET_TOKEN não configurada")
