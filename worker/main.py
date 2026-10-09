@@ -2,7 +2,7 @@ import os
 import time
 
 from worker.gateway import claim_next_job, fail_job, health
-from worker.ingest import process_ingest
+from worker.jobs import dispatch
 
 
 WORKER_MODE = os.getenv("WORKER_MODE", "health").lower()
@@ -17,13 +17,15 @@ def process_job(job: dict):
         f"{job['id']} | {job_type}"
     )
 
-    if job_type == "INGEST":
-        process_ingest(job)
-        return
+    dispatch(job)
 
-    raise RuntimeError(
-        f"Tipo de job ainda não implementado: {job_type}"
-    )
+
+def safe_fail(job: dict, error: Exception):
+    print(f"❌ Falha {job.get('type')} {job.get('id')}: {error}")
+    try:
+        fail_job(job["id"], str(error) or error.__class__.__name__)
+    except Exception as fail_error:
+        print(f"⚠️ Não foi possível registrar /fail para {job.get('id')}: {fail_error}")
 
 
 def main():
@@ -71,10 +73,7 @@ def main():
                     f"{job['id']}: {error}"
                 )
 
-                fail_job(
-                    job["id"],
-                    str(error),
-                )
+                safe_fail(job, error)
 
                 processed += 1
 
@@ -107,10 +106,7 @@ def main():
                     f"{job['id']}: {error}"
                 )
 
-                fail_job(
-                    job["id"],
-                    str(error),
-                )
+                safe_fail(job, error)
 
     raise RuntimeError(
         f"WORKER_MODE inválido: {WORKER_MODE}"
