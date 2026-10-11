@@ -31,3 +31,9 @@ FFMPEG_THREADS (padrão 2) limita FFmpeg, x264 (`threads=N:lookahead-threads=1:r
 
 ## REACT
 RENDER_REACT = Base normalizada no canvas 1080x1920 + Creator (UGC TRIM) com alfa do matte (`alphamerge`), 60% da largura, inferior central; áudio só do UGC; H.264/AAC 48 kHz/30 fps.
+
+## RENDER_REACT — memória (v5)
+- Composição trocada de RGBA+alphamerge+overlay para maskedmerge em yuv420p (Creator e máscara com o mesmo scale/crop/pad 1080x1920; máscara preta fora do Creator).
+- Decoders das 3 entradas limitados a FFMPEG_THREADS; -max_muxing_queue_size 1024.
+- matting.py libera sessão ONNX e buffers NumPy (gc.collect) ao fim do BACKGROUND_REMOVE.
+- Medido localmente (25 s): pico 877 MB -> 612 MB.
