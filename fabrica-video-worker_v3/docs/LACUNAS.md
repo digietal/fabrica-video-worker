@@ -44,3 +44,12 @@ RENDER_REACT = Base normalizada no canvas 1080x1920 + Creator (UGC TRIM) com alf
 - RENDER_REACT consome UGC_MATTE (fallback: BACKGROUND_REMOVE de produções antigas). Composição maskedmerge inalterada.
 - CLEAN/SPLIT nunca dependem de MATTE.
 - Reuso entre produções diferentes ainda não ativo: o Gateway só libera arquivos da própria produção.
+
+## v8 — VOICE_CONVERT (ElevenLabs Speech-to-Speech)
+- Novo handler `worker/voice.py`: NORMALIZE → VOICE_CONVERT (paralelo ao ASSET_MATTE). Extrai WAV, chama
+  POST /v1/speech-to-speech/{voice_id} (model eleven_multilingual_sts_v2, mp3_44100_192), remuxa com o vídeo
+  normalizado (vídeo copiado → mesmos frames; matte continua alinhado). Sem time-stretch: diferença ≤ max(0,6s; 5%)
+  é corrigida com silêncio/corte suave; acima disso o job FALHA.
+- Retentativa: até 3 tentativas para 429/5xx/rede (respeita Retry-After); 401/402/404/créditos falham na hora.
+- Variável obrigatória no Railway: ELEVENLABS_API_KEY (opcional: ELEVENLABS_TIMEOUT, VOICE_MAX_DRIFT_S).
+- MIX: o Gateway entrega o artifact VOICE_CONVERT quando o asset tem voz; sem fallback para o original.
