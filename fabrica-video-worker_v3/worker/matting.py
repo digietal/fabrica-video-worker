@@ -5,6 +5,7 @@ Memória: só 1 quadro em RAM por vez (pipes FFmpeg) + estado recorrente do RVM;
 Falha (RuntimeError -> /fail) se o modelo faltar, o FFmpeg falhar, nenhum quadro for lido
 ou nenhuma pessoa for detectada. Nunca gera arquivo falso.
 """
+import gc
 import subprocess
 import tempfile
 from pathlib import Path
@@ -41,6 +42,7 @@ def remove_background(src: Path, out: Path) -> tuple[Path, dict]:
              "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
              "-threads", T, "-x264-params", f"threads={T}:lookahead-threads=1:rc-lookahead=10",
              "-movflags", "+faststart", str(out)], stdin=subprocess.PIPE, stderr=enc_err)
+        outs = img = pha = buf = None
         rec = [np.zeros((1, 1, 1, 1), np.float32)] * 4
         ds = np.array([BG_DOWNSAMPLE], np.float32)
         frames, coverage_sum, max_cov = 0, 0.0, 0.0
@@ -64,6 +66,10 @@ def remove_background(src: Path, out: Path) -> tuple[Path, dict]:
                 enc.stdin.close()
             dec.stdout.close()
             dec_rc, enc_rc = dec.wait(), enc.wait()
+            # Libera sessão ONNX, estado recorrente e buffers NumPy antes do próximo job.
+            sess = rec = outs = img = pha = buf = None  # noqa: F841
+            del sess, rec, outs, img, pha, buf
+            gc.collect()
         if dec_rc != 0:
             dec_err.seek(0)
             raise RuntimeError(f"BACKGROUND_REMOVE: decodificação falhou: {dec_err.read()[-1000:].decode(errors='ignore')}")

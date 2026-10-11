@@ -119,14 +119,25 @@ def render_split(ugc: Path, base: Path, out: Path) -> Path:
 
 def render_react(base: Path, mask: Path, ugc: Path, out: Path) -> Path:
     """REACT_DEFAULT: Base ocupa o canvas 1080x1920; Creator (UGC TRIM) recortado pelo matte real do
-    BACKGROUND_REMOVE (máscara em tons de cinza) no inferior central, 60% da largura; áudio só do UGC."""
+    BACKGROUND_REMOVE no inferior central, 60% da largura; áudio só do UGC.
+    Composição via maskedmerge em yuv420p (sem RGBA/alphamerge/overlay): Creator e máscara recebem o
+    MESMO scale/crop/pad para 1080x1920; fundo da máscara preto (= Base). A máscara é montada em
+    yuv420p com Y em resolução cheia e U/V em meia resolução derivados da mesma máscara."""
     cw, ch = int(W * 0.6) // 2 * 2, int(H * 0.6) // 2 * 2
-    fc = (_fit("0:v", "bg") + ";"
-          f"[2:v]fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},setsar=1,format=rgba[fg];"
-          f"[1:v]fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},format=gray[m];"
-          f"[fg][m]alphamerge[fga];[bg][fga]overlay=(W-w)/2:H-h:format=auto:shortest=1[v]")
-    _run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(base), "-i", str(mask), "-i", str(ugc),
-          *FT, "-filter_complex", fc, "-map", "[v]", "-map", "2:a:0", "-shortest"] + ENC + [str(out)], out)
+    x, y = (W - cw) // 2, H - ch
+    fit = f"fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},setsar=1"
+    pad = f"pad={W}:{H}:{x}:{y}:color=black"
+    fc = (_fit("0:v", "b0") + ";[b0]format=yuv420p[bg];"
+          f"[2:v]{fit},format=yuv420p,{pad}[fg];"
+          f"[1:v]{fit},format=gray,{pad},split=2[my][mc];"
+          f"[mc]scale={W // 2}:{H // 2}:flags=bilinear,split=2[mu][mv];"
+          "[my][mu][mv]mergeplanes=0x001020:yuv420p[m];"
+          "[bg][fg][m]maskedmerge[v]")
+    # Decoders limitados (sem isso cada entrada abre 1 thread/frame por núcleo do host -> pico de RAM).
+    D = ["-threads", T]
+    _run(["ffmpeg", "-y", *D, "-stream_loop", "-1", "-i", str(base), *D, "-i", str(mask), *D, "-i", str(ugc),
+          *FT, "-filter_complex", fc, "-map", "[v]", "-map", "2:a:0", "-shortest",
+          "-max_muxing_queue_size", "1024"] + ENC + [str(out)], out)
     return out
 
 
