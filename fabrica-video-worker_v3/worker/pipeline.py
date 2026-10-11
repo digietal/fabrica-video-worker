@@ -59,6 +59,42 @@ def process_background_remove(job):
     return _complete(job, "BACKGROUND_REMOVE", out_path, {**meta, **info, "ugc_hash": p["ugc_hash"]})
 
 
+def process_asset_matte(job):
+    """ASSET_MATTE: RVM real no asset normalizado (Gancho/Corpo/CTA; Bases nunca). 1 job por asset."""
+    p = job.get("payload") or {}
+    asset_id = p.get("asset_id")
+    if not asset_id:
+        raise RuntimeError(f"ASSET_MATTE {job['id']} sem asset_id")
+    norm = require_input(job, "normalized")
+    out_path = f"{storage.run_dir(norm)}/matte/assets/{asset_id}.mp4"
+    with tempfile.TemporaryDirectory(prefix=f"fabrica_amatte_{job['id']}_") as tmp:
+        src = storage.download(norm, Path(tmp) / "norm.mp4")
+        out, info = matting.remove_background(src, Path(tmp) / "matte.mp4", label="ASSET_MATTE")
+        meta = ffmpeg.probe(out)
+        storage.upload(out, out_path, "video/mp4")
+    return _complete(job, "ASSET_MATTE", out_path, {**meta, **info, "asset_id": asset_id, "asset_kind": p.get("kind")})
+
+
+def process_ugc_matte(job):
+    """UGC_MATTE: concat dos ASSET_MATTE (ordem do MIX) + mesmos cortes do TRIM (recalculados do MIX). Sem IA."""
+    p = job.get("payload") or {}
+    ugc = p.get("ugc_hash")
+    if not ugc:
+        raise RuntimeError(f"UGC_MATTE {job['id']} sem ugc_hash")
+    keys = ["hook", "body1"] + (["body2"] if p.get("body2_asset_id") else []) + ["cta"]
+    paths = [require_input(job, k) for k in keys]
+    mix = require_input(job, "mix")
+    out_path = f"{storage.run_dir(mix)}/matte/ugc/{ugc}.mp4"
+    with tempfile.TemporaryDirectory(prefix=f"fabrica_umatte_{job['id']}_") as tmp:
+        keep = ffmpeg.silence_keep(storage.download(mix, Path(tmp) / "mix.mp4"), TRIM_SILENCE_DB, TRIM_MIN_PAUSE_MS)
+        parts = [storage.download(sp, Path(tmp) / f"{i}_{k}.mp4") for i, (k, sp) in enumerate(zip(keys, paths))]
+        out = ffmpeg.ugc_matte(parts, keep, Path(tmp) / "ugc_matte.mp4")
+        meta = ffmpeg.probe(out)
+        storage.upload(out, out_path, "video/mp4")
+    return _complete(job, "UGC_MATTE", out_path, {**meta, "ugc_hash": ugc, "segments": len(keep),
+                                                 "source_mattes": paths})
+
+
 def _render(job, kind, build):
     if not job.get("production_item_id"):
         raise RuntimeError(f"{kind} {job['id']} sem production_item_id")

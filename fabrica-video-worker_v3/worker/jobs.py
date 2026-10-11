@@ -5,9 +5,11 @@ from worker import pipeline
 HANDLERS = {
     "INGEST": process_ingest,
     "NORMALIZE": process_normalize,
+    "ASSET_MATTE": pipeline.process_asset_matte,
     "MIX": pipeline.process_mix,
     "TRIM": pipeline.process_trim,
     "BACKGROUND_REMOVE": pipeline.process_background_remove,
+    "UGC_MATTE": pipeline.process_ugc_matte,
     "RENDER_CLEAN": pipeline.process_render_clean,
     "RENDER_SPLIT": pipeline.process_render_split,
     "RENDER_REACT": pipeline.process_render_react,

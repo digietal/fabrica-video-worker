@@ -72,8 +72,8 @@ def concat(parts: list[Path], out: Path) -> Path:
     return out
 
 
-def trim_silence(src: Path, out: Path, silence_db: float, min_pause_ms: int) -> Path:
-    """Remove pausas > min_pause_ms abaixo de silence_db (valores vindos de produce.ts)."""
+def silence_keep(src: Path, silence_db: float, min_pause_ms: int) -> list[tuple[float, float]]:
+    """Intervalos mantidos pelo TRIM (silencedetect no áudio). Usado pelo TRIM e pelo UGC_MATTE (mesmos cortes)."""
     sec = min_pause_ms / 1000
     res = subprocess.run(["ffmpeg", "-i", str(src), "-af", f"silencedetect=noise={silence_db}dB:d={sec}", "-f", "null", "-"],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -93,11 +93,33 @@ def trim_silence(src: Path, out: Path, silence_db: float, min_pause_ms: int) -> 
         cur = e
     if cur < dur:
         keep.append((cur, dur))
-    keep = [(a, b) for a, b in keep if b - a > 0.05] or [(0.0, dur)]
+    return [(a, b) for a, b in keep if b - a > 0.05] or [(0.0, dur)]
+
+
+def trim_silence(src: Path, out: Path, silence_db: float, min_pause_ms: int) -> Path:
+    """Remove pausas > min_pause_ms abaixo de silence_db (valores vindos de produce.ts)."""
+    keep = silence_keep(src, silence_db, min_pause_ms)
     segs = "".join(f"[0:v]trim={a:.3f}:{b:.3f},setpts=PTS-STARTPTS[v{i}];"
                    f"[0:a]atrim={a:.3f}:{b:.3f},asetpts=PTS-STARTPTS[a{i}];" for i, (a, b) in enumerate(keep))
     fc = segs + "".join(f"[v{i}][a{i}]" for i in range(len(keep))) + f"concat=n={len(keep)}:v=1:a=1[v][a]"
     _run(["ffmpeg", "-y", "-i", str(src), *FT, "-filter_complex", fc, "-map", "[v]", "-map", "[a]"] + ENC + [str(out)], out)
+    return out
+
+
+def ugc_matte(mattes: list[Path], keep: list[tuple[float, float]], out: Path) -> Path:
+    """UGC_MATTE: concatena as máscaras dos assets (ordem do MIX) e aplica os MESMOS cortes do TRIM.
+    Só vídeo, cinza, 30 fps; sem IA. Streaming via filtergraph."""
+    D = ["-threads", T]
+    inputs = [x for m in mattes for x in (*D, "-i", str(m))]
+    cat = "".join(f"[{i}:v]fps={FPS},format=gray,setpts=PTS-STARTPTS[c{i}];" for i in range(len(mattes)))
+    cat += "".join(f"[c{i}]" for i in range(len(mattes))) + f"concat=n={len(mattes)}:v=1:a=0,split={len(keep)}" \
+        + "".join(f"[s{i}]" for i in range(len(keep))) + ";"
+    segs = "".join(f"[s{i}]trim={a:.3f}:{b:.3f},setpts=PTS-STARTPTS[v{i}];" for i, (a, b) in enumerate(keep))
+    fc = cat + segs + "".join(f"[v{i}]" for i in range(len(keep))) + f"concat=n={len(keep)}:v=1:a=0[v]"
+    _run(["ffmpeg", "-y", *inputs, *FT, "-filter_complex", fc, "-map", "[v]", "-an",
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(FPS),
+          "-threads", T, "-x264-params", f"threads={T}:lookahead-threads=1:rc-lookahead=10",
+          "-movflags", "+faststart", str(out)], out)
     return out
 
 

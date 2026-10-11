@@ -15,11 +15,11 @@ from worker.config import BG_DOWNSAMPLE, BG_MIN_COVERAGE, BG_PROVIDER, BG_WIDTH,
 FPS = 30
 
 
-def remove_background(src: Path, out: Path) -> tuple[Path, dict]:
+def remove_background(src: Path, out: Path, label: str = "BACKGROUND_REMOVE") -> tuple[Path, dict]:
     if BG_PROVIDER != "rvm":
-        raise RuntimeError(f"BACKGROUND_REMOVE: BG_PROVIDER='{BG_PROVIDER}' não suportado (use 'rvm').")
+        raise RuntimeError(f"{label}: BG_PROVIDER='{BG_PROVIDER}' não suportado (use 'rvm').")
     if not Path(RVM_MODEL_PATH).exists():
-        raise RuntimeError(f"BACKGROUND_REMOVE: modelo RVM não encontrado em {RVM_MODEL_PATH}.")
+        raise RuntimeError(f"{label}: modelo RVM não encontrado em {RVM_MODEL_PATH}.")
     import numpy as np
     import onnxruntime as ort
 
@@ -72,15 +72,15 @@ def remove_background(src: Path, out: Path) -> tuple[Path, dict]:
             gc.collect()
         if dec_rc != 0:
             dec_err.seek(0)
-            raise RuntimeError(f"BACKGROUND_REMOVE: decodificação falhou: {dec_err.read()[-1000:].decode(errors='ignore')}")
+            raise RuntimeError(f"{label}: decodificação falhou: {dec_err.read()[-1000:].decode(errors='ignore')}")
         if enc_rc != 0:
             enc_err.seek(0)
-            raise RuntimeError(f"BACKGROUND_REMOVE: gravação do matte falhou: {enc_err.read()[-1000:].decode(errors='ignore')}")
+            raise RuntimeError(f"{label}: gravação do matte falhou: {enc_err.read()[-1000:].decode(errors='ignore')}")
     if frames == 0:
-        raise RuntimeError("BACKGROUND_REMOVE: nenhum quadro lido do UGC TRIM.")
+        raise RuntimeError(f"{label}: nenhum quadro lido do UGC TRIM.")
     if max_cov < BG_MIN_COVERAGE:
-        raise RuntimeError("BACKGROUND_REMOVE: nenhuma pessoa detectada no vídeo do Creator. Nada foi salvo.")
+        raise RuntimeError(f"{label}: nenhuma pessoa detectada no vídeo do Creator. Nada foi salvo.")
     if not out.exists() or out.stat().st_size == 0:
-        raise RuntimeError("BACKGROUND_REMOVE: matte não foi gerado.")
+        raise RuntimeError(f"{label}: matte não foi gerado.")
     return out, {"provider": "rvm_mobilenetv3", "matte_width": w, "matte_height": h, "frames": frames,
                  "mean_coverage": round(coverage_sum / frames, 4), "downsample_ratio": BG_DOWNSAMPLE}
