@@ -37,3 +37,10 @@ RENDER_REACT = Base normalizada no canvas 1080x1920 + Creator (UGC TRIM) com alf
 - Decoders das 3 entradas limitados a FFMPEG_THREADS; -max_muxing_queue_size 1024.
 - matting.py libera sessão ONNX e buffers NumPy (gc.collect) ao fim do BACKGROUND_REMOVE.
 - Medido localmente (25 s): pico 877 MB -> 612 MB.
+
+## MATTE reutilizável por asset (Bloco 1)
+- ASSET_MATTE (1 por Gancho/Corpo/CTA, nunca Base): RVM no asset normalizado -> `<owner>/<project>/<run>/matte/assets/<asset_id>.mp4` (cinza, 540x960, 30 fps).
+- UGC_MATTE (1 por UGC, sem IA): concat dos ASSET_MATTE na ordem do MIX + mesmos cortes do TRIM (recalculados do MIX com os mesmos parâmetros) -> `matte/ugc/<ugc_hash>.mp4`.
+- RENDER_REACT consome UGC_MATTE (fallback: BACKGROUND_REMOVE de produções antigas). Composição maskedmerge inalterada.
+- CLEAN/SPLIT nunca dependem de MATTE.
+- Reuso entre produções diferentes ainda não ativo: o Gateway só libera arquivos da própria produção.
