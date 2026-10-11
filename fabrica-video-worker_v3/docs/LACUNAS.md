@@ -19,14 +19,15 @@ Enriquecimento proposto (somente na resposta; IMPLEMENTADO no Gateway — cada i
 | ZIP | files [{storage_path, file_name}], folder, zip_name | block_items (ordem position) + artifacts dos itens; BLOCO_NN_PRODUTO_DD-MMM |
 
 Outras lacunas:
-
-1. **BACKGROUND_REMOVE**: não existe provider definido no produto. `BackgroundRemovalProvider` é o ponto isolado; hoje falha sem processar. Consequência: RENDER_REACT também fica bloqueado.
-2. **THUMBNAIL**: `/complete` só cria artifacts; não atualiza `thumbnail_path` do artifact de render existente. O Worker registra um artifact `THUMBNAIL` próprio (com `thumbnail_path` = jpg). A galeria do app só verá a miniatura se passar a ler esse artifact ou se o `/complete` ganhar essa ligação.
+1. **BACKGROUND_REMOVE**: RESOLVIDO — provider local Robust Video Matting (ONNX/CPU) em `worker/matting.py`. Gera `matte/<ugc_hash>.mp4` (máscara alfa em tons de cinza, 540x960, 30 fps, mesma duração do TRIM). Falha real -> /fail (modelo ausente, FFmpeg, nenhum quadro, nenhuma pessoa detectada). Variáveis: BG_PROVIDER=rvm, RVM_MODEL_PATH, BG_WIDTH=540, BG_DOWNSAMPLE=0.4, BG_MIN_COVERAGE=0.01.
+2. **THUMBNAIL**: RESOLVIDO no Gateway — `/complete` copia o JPG para `thumbnail_path` do artifact de render do item (vale para CLEAN, SPLIT e REACT). Histórico: O Worker registra um artifact `THUMBNAIL` próprio (com `thumbnail_path` = jpg). A galeria do app só verá a miniatura se passar a ler esse artifact ou se o `/complete` ganhar essa ligação.
 3. **Cache**: não há rota para consultar artifacts por `cache_key`; o Worker não consegue pular trabalho já feito. O `/complete` já evita artifact duplicado (mesmo dono + cache_key + storage_path).
 4. **TRIM**: usa silence_db=-35 e min_pause_ms=250, os únicos parâmetros existentes (definidos no cache_key em produce.ts).
 5. **REACT_DEFAULT**: o produto não define tamanho do creator; usado 60% da largura, encostado no rodapé, centralizado. Confirmar.
-6. Caminhos de saída escolhidos pelo Worker: `<owner>/<project>/<run>/{normalized/<asset_id>.mp4, mix|trim/<ugc_hash>.mp4, matte/<ugc_hash>.mov, renders/<creative_code>.mp4|.jpg, zips/<zip_name>}`.
+6. Caminhos de saída escolhidos pelo Worker: `<owner>/<project>/<run>/{normalized/<asset_id>.mp4, mix|trim/<ugc_hash>.mp4, matte/<ugc_hash>.mp4, renders/<creative_code>.mp4|.jpg, zips/<zip_name>}`.
 
 ## Memória (Railway)
+FFMPEG_THREADS (padrão 2) limita FFmpeg, x264 (`threads=N:lookahead-threads=1:rc-lookahead=10`), `-filter_threads 1` e o ONNX Runtime do recorte. Medido localmente: pico ~750 MB no BACKGROUND_REMOVE+REACT; demais etapas 300–600 MB. Recomendado: 1 GB+ de RAM no serviço.
 
-`FFMPEG_THREADS` (variável de ambiente, padrão `2`) limita as threads do FFmpeg/x264 (`-threads N`, `-x264-params threads=N:lookahead-threads=1:rc-lookahead=10`) e os filtros usam `-filter_threads 1`. Objetivo: evitar que o x264 detecte todos os núcleos do host (ex.: 60 threads) e estoure a RAM do container (SIGKILL, code -9).
+## REACT
+RENDER_REACT = Base normalizada no canvas 1080x1920 + Creator (UGC TRIM) com alfa do matte (`alphamerge`), 60% da largura, inferior central; áudio só do UGC; H.264/AAC 48 kHz/30 fps.
