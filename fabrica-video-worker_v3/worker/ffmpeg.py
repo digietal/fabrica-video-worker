@@ -141,12 +141,14 @@ def render_split(ugc: Path, base: Path, out: Path) -> Path:
 
 def render_react(base: Path, mask: Path, ugc: Path, out: Path) -> Path:
     """REACT_DEFAULT: Base ocupa o canvas 1080x1920; Creator (UGC TRIM) recortado pelo matte real do
-    BACKGROUND_REMOVE no inferior central, 60% da largura; áudio só do UGC.
+    BACKGROUND_REMOVE no canto inferior direito, 60% da largura; áudio só do UGC.
     Composição via maskedmerge em yuv420p (sem RGBA/alphamerge/overlay): Creator e máscara recebem o
     MESMO scale/crop/pad para 1080x1920; fundo da máscara preto (= Base). A máscara é montada em
     yuv420p com Y em resolução cheia e U/V em meia resolução derivados da mesma máscara."""
     cw, ch = int(W * 0.6) // 2 * 2, int(H * 0.6) // 2 * 2
-    x, y = (W - cw) // 2, H - ch
+    # Canto inferior direito com margem segura (valores pares p/ yuv420p).
+    m = 24
+    x, y = max(0, W - cw - m) // 2 * 2, max(0, H - ch - m) // 2 * 2
     fit = f"fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},setsar=1"
     pad = f"pad={W}:{H}:{x}:{y}:color=black"
     fc = (_fit("0:v", "b0") + ";[b0]format=yuv420p[bg];"
