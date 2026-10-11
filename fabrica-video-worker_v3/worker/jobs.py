@@ -1,11 +1,13 @@
 from worker.ingest import process_ingest
 from worker.normalize import process_normalize
 from worker import pipeline
+from worker.voice import process_voice_convert
 
 HANDLERS = {
     "INGEST": process_ingest,
     "NORMALIZE": process_normalize,
     "ASSET_MATTE": pipeline.process_asset_matte,
+    "VOICE_CONVERT": process_voice_convert,
     "MIX": pipeline.process_mix,
     "TRIM": pipeline.process_trim,
     "BACKGROUND_REMOVE": pipeline.process_background_remove,
