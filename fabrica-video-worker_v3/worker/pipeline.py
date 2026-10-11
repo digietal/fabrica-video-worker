@@ -2,8 +2,8 @@
 import tempfile
 from pathlib import Path
 
-from worker import ffmpeg, storage
-from worker.contracts import GatewayContractGap, require_input, require_list
+from worker import ffmpeg, matting, storage
+from worker.contracts import require_input, require_list
 from worker.gateway import complete_job
 
 # Parâmetros de TRIM definidos em src/lib/factory/produce.ts (cache_key do TRIM).
@@ -46,26 +46,17 @@ def process_trim(job):
                                              "silence_db": TRIM_SILENCE_DB, "min_pause_ms": TRIM_MIN_PAUSE_MS})
 
 
-class BackgroundRemovalProvider:
-    """Ponto de integração isolado. Nenhum provider está definido no produto."""
-    def remove(self, src: Path, out: Path) -> Path:
-        raise GatewayContractGap("BACKGROUND_REMOVE: nenhum provider de remoção de fundo configurado. "
-                                 "Nada foi processado.")
-
-
-BG_PROVIDER = BackgroundRemovalProvider()
-
-
 def process_background_remove(job):
+    """Matte real (RVM). Sucesso só com arquivo real no Storage; qualquer falha -> /fail, sem artifact."""
     p = job.get("payload") or {}
     trim = require_input(job, "trim")
-    out_path = f"{storage.run_dir(trim)}/matte/{p['ugc_hash']}.mov"
+    out_path = f"{storage.run_dir(trim)}/matte/{p['ugc_hash']}.mp4"
     with tempfile.TemporaryDirectory(prefix=f"fabrica_bg_{job['id']}_") as tmp:
         src = storage.download(trim, Path(tmp) / "trim.mp4")
-        out = BG_PROVIDER.remove(src, Path(tmp) / "matte.mov")  # falha controlada até haver provider
+        out, info = matting.remove_background(src, Path(tmp) / "matte.mp4")
         meta = ffmpeg.probe(out)
-        storage.upload(out, out_path, "video/quicktime")
-    return _complete(job, "BACKGROUND_REMOVE", out_path, {**meta, "ugc_hash": p["ugc_hash"]})
+        storage.upload(out, out_path, "video/mp4")
+    return _complete(job, "BACKGROUND_REMOVE", out_path, {**meta, **info, "ugc_hash": p["ugc_hash"]})
 
 
 def _render(job, kind, build):
@@ -95,7 +86,7 @@ def process_render_split(job):
 def process_render_react(job):
     base, matte = require_input(job, "base"), require_input(job, "matte")
     return _render(job, "RENDER_REACT", lambda tmp, ugc, out: ffmpeg.render_react(
-        storage.download(base, tmp / "base.mp4"), storage.download(matte, tmp / "matte.mov"), ugc, out))
+        storage.download(base, tmp / "base.mp4"), storage.download(matte, tmp / "matte.mp4"), ugc, out))
 
 
 def process_thumbnail(job):
