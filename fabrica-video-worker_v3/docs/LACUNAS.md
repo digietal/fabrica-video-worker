@@ -53,3 +53,17 @@ RENDER_REACT = Base normalizada no canvas 1080x1920 + Creator (UGC TRIM) com alf
 - Retentativa: até 3 tentativas para 429/5xx/rede (respeita Retry-After); 401/402/404/créditos falham na hora.
 - Variável obrigatória no Railway: ELEVENLABS_API_KEY (opcional: ELEVENLABS_TIMEOUT, VOICE_MAX_DRIFT_S).
 - MIX: o Gateway entrega o artifact VOICE_CONVERT quando o asset tem voz; sem fallback para o original.
+
+## v10 — Concorrência controlada + cache local + métricas
+Variáveis (todas opcionais; padrão conservador):
+| Variável | Padrão | Significado |
+|---|---|---|
+| WORKER_CONCURRENCY | 2 | jobs simultâneos neste processo (teto WORKER_CONCURRENCY_MAX=4) |
+| HEAVY_CONCURRENCY | 1 | jobs pesados simultâneos (ASSET_MATTE, BACKGROUND_REMOVE, RENDER_REACT) |
+| MIN_FREE_MEM_MB | 450 | não reivindica novo job se a memória livre do contêiner for menor |
+| FFMPEG_THREADS | 2 | threads por processo FFmpeg (inalterado) |
+| MAX_JOBS | 1 | total de jobs em WORKER_MODE=once — NÃO é concorrência |
+| CACHE_ENABLED / CACHE_DIR / CACHE_MAX_MB / CACHE_TTL_HOURS | 1 / /tmp/fabrica-cache / 3000 / 12 | cache local |
+Rollback sem reimplantar: WORKER_CONCURRENCY=1 e CACHE_ENABLED=0 reproduzem o comportamento do v9.
+Logs: linhas `📊 {"event":"job_start"|"job_end"|...}` em JSON (run_id, job_id, type, duração, active_jobs,
+download/upload s+bytes, cache_hit/miss, memória, load, erro). Testes: `python -m unittest discover -s tests -t .`
