@@ -67,3 +67,10 @@ Variáveis (todas opcionais; padrão conservador):
 Rollback sem reimplantar: WORKER_CONCURRENCY=1 e CACHE_ENABLED=0 reproduzem o comportamento do v9.
 Logs: linhas `📊 {"event":"job_start"|"job_end"|...}` em JSON (run_id, job_id, type, duração, active_jobs,
 download/upload s+bytes, cache_hit/miss, memória, load, erro). Testes: `python -m unittest discover -s tests -t .`
+
+## v11 — Aceleração sem custo
+- RENDER_CLEAN: se o TRIM já está no formato final (1080x1920, 30fps, H.264, AAC 48k estéreo), copia os streams (`-c copy`) em vez de recodificar. Caso contrário, recodifica como antes.
+- RENDER_SPLIT / RENDER_REACT: áudio do UGC copiado (já é AAC 48k estéreo); vídeo continua recodificado.
+- Memória livre desconta `inactive_file` (page cache recuperável) do cgroup.
+- MIN_FREE_MEM_MB padrão 280 (claim); HEAVY_MIN_FREE_MEM_MB 450 (antes de iniciar ASSET_MATTE/BACKGROUND_REMOVE/RENDER_REACT).
+- Rollback: MIN_FREE_MEM_MB=450 ou reimplantar v10.
