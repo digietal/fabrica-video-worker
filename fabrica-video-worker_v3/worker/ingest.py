@@ -61,7 +61,7 @@ def download_signed_url(url: str, destination: Path):
         },
     )
 
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request, timeout=180) as response:
         destination.write_bytes(response.read())
 
 
