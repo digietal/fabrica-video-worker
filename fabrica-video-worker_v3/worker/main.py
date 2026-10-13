@@ -1,4 +1,4 @@
-"""Loop do Worker v10: concorrência controlada.
+"""Loop do Worker v11: concorrência controlada.
 
 - Um único laço faz o /claim (atômico no banco: claim_next_job() com SKIP LOCKED + dependências).
   Só reivindica quando há vaga livre E memória suficiente; jobs nunca ficam reivindicados "na fila local".
@@ -27,7 +27,9 @@ CONCURRENCY_MAX = int(os.getenv("WORKER_CONCURRENCY_MAX", "4"))
 CONCURRENCY = max(1, min(CONCURRENCY_MAX, int(os.getenv("WORKER_CONCURRENCY", "2"))))
 HEAVY_CONCURRENCY = max(1, min(CONCURRENCY, int(os.getenv("HEAVY_CONCURRENCY", "1"))))
 # Só reivindica um novo job se sobrar pelo menos isso de memória no contêiner (MB).
-MIN_FREE_MEM_MB = float(os.getenv("MIN_FREE_MEM_MB", "450"))
+MIN_FREE_MEM_MB = float(os.getenv("MIN_FREE_MEM_MB", "280"))
+# v11: jobs pesados (RVM/REACT) só começam com esta memória livre (o tipo só é conhecido após o claim).
+HEAVY_MIN_FREE_MEM_MB = float(os.getenv("HEAVY_MIN_FREE_MEM_MB", "450"))
 HEAVY_TYPES = {"ASSET_MATTE", "BACKGROUND_REMOVE", "RENDER_REACT"}
 
 
@@ -55,6 +57,10 @@ class Runner:
         t_claim = time.monotonic()
         if heavy:
             self.heavy.acquire()
+            # Espera memória para o job pesado (máx. 10 min; depois roda mesmo assim — o lease protege).
+            deadline = time.monotonic() + 600
+            while not memory_ok(HEAVY_MIN_FREE_MEM_MB) and time.monotonic() < deadline:
+                time.sleep(2.0)
         t0, start = time.monotonic(), time.time()
         metrics.begin(job)
         status, err = "COMPLETED", None
@@ -105,9 +111,9 @@ class Runner:
         self.pool.shutdown(wait=True)
 
 
-def memory_ok() -> bool:
+def memory_ok(min_free=None) -> bool:
     free = metrics.memory_mb().get("mem_free_mb")
-    return free is None or free >= MIN_FREE_MEM_MB
+    return free is None or free >= (MIN_FREE_MEM_MB if min_free is None else min_free)
 
 
 def claim_with_backoff(state: dict):
@@ -175,9 +181,9 @@ def idle_forever():
 
 
 def main():
-    print(f"🚀 Fábrica Video Worker v10 | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
+    print(f"🚀 Fábrica Video Worker v11 | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
           f"WORKER_CONCURRENCY={CONCURRENCY} | HEAVY_CONCURRENCY={HEAVY_CONCURRENCY} | "
-          f"FFMPEG_THREADS={FFMPEG_THREADS} | MIN_FREE_MEM_MB={MIN_FREE_MEM_MB:.0f} | "
+          f"FFMPEG_THREADS={FFMPEG_THREADS} | MIN_FREE_MEM_MB={MIN_FREE_MEM_MB:.0f} | HEAVY_MIN_FREE_MEM_MB={HEAVY_MIN_FREE_MEM_MB:.0f} | "
           f"CACHE={'on' if cache.CACHE_ENABLED else 'off'} {cache.CACHE_DIR} max={cache.CACHE_MAX_MB:.0f}MB",
           flush=True)
     metrics.log("worker_start", **metrics.memory_mb(), **metrics.cpu())

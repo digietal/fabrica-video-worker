@@ -60,6 +60,14 @@ def memory_mb() -> dict:
             limit = vals["MemTotal"]
             if used is None and "MemAvailable" in vals:
                 used = limit - vals["MemAvailable"]
+    # v11: memory.current inclui page cache de arquivos (recuperável pelo kernel). Desconta inactive_file
+    # para não pausar claims por falsa falta de memória enquanto o FFmpeg lê/grava vídeos.
+    stat = _read("/sys/fs/cgroup/memory.stat") or _read("/sys/fs/cgroup/memory/memory.stat") or ""
+    for line in stat.splitlines():
+        k, _, v = line.partition(" ")
+        if k in ("inactive_file", "total_inactive_file") and v.strip().isdigit() and used is not None:
+            used = max(0.0, used - int(v) / 2**20)
+            break
     free = (limit - used) if (limit is not None and used is not None) else None
     r = lambda v: None if v is None else round(v)
     return {"mem_used_mb": r(used), "mem_limit_mb": r(limit), "mem_free_mb": r(free)}

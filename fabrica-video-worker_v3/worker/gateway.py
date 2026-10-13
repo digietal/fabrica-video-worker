@@ -31,7 +31,7 @@ def _sess():
     s = getattr(_local, "s", None)
     if s is None:
         s = requests.Session()
-        s.headers.update({"User-Agent": "fabrica-video-worker/1.2", "Accept": "application/json"})
+        s.headers.update({"User-Agent": "fabrica-video-worker/1.3", "Accept": "application/json"})
         _local.s = s
     return s
 

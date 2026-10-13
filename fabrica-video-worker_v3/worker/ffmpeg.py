@@ -123,9 +123,30 @@ def ugc_matte(mattes: list[Path], keep: list[tuple[float, float]], out: Path) ->
     return out
 
 
+def _matches_final(meta: dict) -> bool:
+    """True quando o arquivo já está exatamente no formato final (saída do TRIM): 1080x1920, 30fps, H.264, AAC 48k estéreo."""
+    return (meta.get("width") == W and meta.get("height") == H and meta.get("video_codec") == "h264"
+            and meta.get("fps") is not None and abs(meta["fps"] - FPS) < 0.01 and meta.get("audio_codec") == "aac"
+            and str(meta.get("audio_sample_rate")) == "48000" and meta.get("audio_channels") == 2)
+
+
 def render_clean(ugc: Path, out: Path) -> Path:
+    """LIMPO = UGC após TRIM. v11: se o TRIM já está no formato final, copia os streams (sem recodificar)."""
+    if _matches_final(probe(ugc)):
+        _run(["ffmpeg", "-y", "-i", str(ugc), "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
+              "-movflags", "+faststart", str(out)], out)
+        return out
     _run(["ffmpeg", "-y", "-i", str(ugc), *FT, "-filter_complex", _fit("0:v", "v"), "-map", "[v]", "-map", "0:a:0"] + ENC + [str(out)], out)
     return out
+
+
+def _enc_audio_copy(ugc: Path) -> list[str]:
+    """ENC com áudio copiado quando o áudio do UGC já é AAC 48k estéreo (sempre, após TRIM)."""
+    m = probe(ugc)
+    if m.get("audio_codec") == "aac" and str(m.get("audio_sample_rate")) == "48000" and m.get("audio_channels") == 2:
+        i = ENC.index("-c:a")
+        return ENC[:i] + ["-c:a", "copy"] + [x for x in ENC[i + 2:] if x not in ("-b:a", "160k", "-ar", "48000", "-ac", "2")]
+    return ENC
 
 
 def render_split(ugc: Path, base: Path, out: Path) -> Path:
@@ -135,7 +156,7 @@ def render_split(ugc: Path, base: Path, out: Path) -> Path:
           f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[bot];"
           f"[top][bot]vstack=inputs=2[v]")
     _run(["ffmpeg", "-y", "-i", str(ugc), "-stream_loop", "-1", "-i", str(base), *FT, "-filter_complex", fc,
-          "-map", "[v]", "-map", "0:a:0", "-shortest"] + ENC + [str(out)], out)
+          "-map", "[v]", "-map", "0:a:0", "-shortest"] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
 
 
@@ -161,7 +182,7 @@ def render_react(base: Path, mask: Path, ugc: Path, out: Path) -> Path:
     D = ["-threads", T]
     _run(["ffmpeg", "-y", *D, "-stream_loop", "-1", "-i", str(base), *D, "-i", str(mask), *D, "-i", str(ugc),
           *FT, "-filter_complex", fc, "-map", "[v]", "-map", "2:a:0", "-shortest",
-          "-max_muxing_queue_size", "1024"] + ENC + [str(out)], out)
+          "-max_muxing_queue_size", "1024"] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
 
 
