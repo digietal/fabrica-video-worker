@@ -150,11 +150,18 @@ def _enc_audio_copy(ugc: Path) -> list[str]:
 
 
 def render_split(ugc: Path, base: Path, out: Path) -> Path:
-    """SPLIT_50_50: UGC em cima, Base embaixo, crop sem deformar, áudio só do UGC, duração do UGC."""
+    """SPLIT_50_50 (v12): Base em cima (1080x960, cover+crop), Avatar/UGC embaixo (1080x960).
+    O avatar NÃO é cortado: escala proporcional pela altura (contain) centralizada, com preenchimento
+    lateral feito pelo próprio UGC desfocado (sem deformar, sem cortar olhos/testa/queixo).
+    Áudio só do UGC, duração do UGC."""
     hh = H // 2
-    fc = (f"[0:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[top];"
-          f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[bot];"
-          f"[top][bot]vstack=inputs=2[v]")
+    fc = (f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[top];"
+          f"[0:v]fps={FPS},setsar=1,split=2[uf][ub];"
+          f"[ub]scale={W // 4}:{hh // 4}:force_original_aspect_ratio=increase,crop={W // 4}:{hh // 4},"
+          f"boxblur=8:2,scale={W}:{hh},setsar=1[ubg];"
+          f"[uf]scale={W}:{hh}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[ufg];"
+          f"[ubg][ufg]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[bot];"
+          f"[top][bot]vstack=inputs=2:shortest=1[v]")
     _run(["ffmpeg", "-y", "-i", str(ugc), "-stream_loop", "-1", "-i", str(base), *FT, "-filter_complex", fc,
           "-map", "[v]", "-map", "0:a:0", "-shortest"] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
