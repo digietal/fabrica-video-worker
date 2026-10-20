@@ -8,6 +8,7 @@
 - Falha de um job nunca interrompe os demais; SIGTERM: para de reivindicar e espera os ativos.
 """
 import os
+import random
 import signal
 import threading
 import time
@@ -30,6 +31,10 @@ HEAVY_CONCURRENCY = max(1, min(CONCURRENCY, int(os.getenv("HEAVY_CONCURRENCY", "
 MIN_FREE_MEM_MB = float(os.getenv("MIN_FREE_MEM_MB", "280"))
 # v11: jobs pesados (RVM/REACT) só começam com esta memória livre (o tipo só é conhecido após o claim).
 HEAVY_MIN_FREE_MEM_MB = float(os.getenv("HEAVY_MIN_FREE_MEM_MB", "450"))
+HEAVY_WAIT_RELEASE = os.getenv("HEAVY_WAIT_RELEASE", "0").strip() == "1"  # v16, padrão desligado
+# v17: variação aleatória da espera ociosa para vários Workers não consultarem a fila em sincronia.
+IDLE_JITTER = float(os.getenv("IDLE_JITTER", "0.3"))
+HEARTBEAT_S = float(os.getenv("HEARTBEAT_S", "60"))
 HEAVY_TYPES = {"ASSET_MATTE", "BACKGROUND_REMOVE", "RENDER_REACT"}
 
 
@@ -39,7 +44,9 @@ class Runner:
         self.concurrency = concurrency
         self.slots = threading.BoundedSemaphore(concurrency)
         self.heavy = threading.BoundedSemaphore(heavy)
-        self.pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="job")
+        # +1 thread: um job pesado esperando (HEAVY_WAIT_RELEASE) não pode bloquear o job leve que entrou na vaga.
+        self.pool = ThreadPoolExecutor(max_workers=concurrency + 1, thread_name_prefix="job")
+        self.heavy_waiting = 0
         self.active = 0
         self._lock = threading.Lock()
         self.active_ids: set[str] = set()
@@ -56,7 +63,27 @@ class Runner:
         heavy = job.get("type") in HEAVY_TYPES
         t_claim = time.monotonic()
         if heavy:
-            self.heavy.acquire()
+            # v16 (HEAVY_WAIT_RELEASE=1): se a vaga pesada está ocupada, devolve a vaga geral enquanto
+            # espera, para jobs leves executáveis não ficarem parados. No máx. 1 job pesado esperando.
+            released = False
+            if HEAVY_WAIT_RELEASE and not self.heavy.acquire(blocking=False):
+                with self._lock:
+                    can_wait = self.heavy_waiting == 0
+                    if can_wait:
+                        self.heavy_waiting += 1
+                if can_wait:
+                    self.slots.release()
+                    released = True
+                    self.heavy.acquire()
+                    self.slots.acquire()
+                    with self._lock:
+                        self.heavy_waiting -= 1
+                else:
+                    self.heavy.acquire()
+            elif not HEAVY_WAIT_RELEASE:
+                self.heavy.acquire()
+            if released:
+                metrics.log("heavy_slot_acquired", job_id=job.get("id"), released_slot_while_waiting=True)
             # Espera memória para o job pesado (máx. 10 min; depois roda mesmo assim — o lease protege).
             deadline = time.monotonic() + 600
             while not memory_ok(HEAVY_MIN_FREE_MEM_MB) and time.monotonic() < deadline:
@@ -101,7 +128,7 @@ class Runner:
             self.active_ids.add(job.get("id"))
             active = self.active
         metrics.log("job_start", run_id=job.get("production_run_id"), job_id=job.get("id"), type=job.get("type"),
-                    attempts=job.get("attempts"), active_jobs=active)
+                    attempts=job.get("attempts"), active_jobs=active, queue_wait_s=metrics.queue_wait_s(job))
         self.pool.submit(self.run_one, job)
 
     def acquire_slot(self, timeout=None) -> bool:
@@ -143,7 +170,15 @@ def run_loop(runner: Runner, claim_fn, mode: str, max_jobs: int, stop: threading
     state = {"outage": 0}
     claimed = 0
     low_mem_logged = False
+    idle_polls = 0
+    last_hb = time.monotonic()
     while not stop.is_set():
+        if HEARTBEAT_S > 0 and time.monotonic() - last_hb >= HEARTBEAT_S:
+            # v17: estado do Worker para medir saturação/ociosidade da frota.
+            metrics.log("worker_heartbeat", active_jobs=runner.active, capacity=runner.concurrency,
+                        heavy_waiting=runner.heavy_waiting, idle_polls=idle_polls, claimed=claimed,
+                        **metrics.memory_mb(), **metrics.cpu())
+            last_hb, idle_polls = time.monotonic(), 0
         if mode == "once" and claimed >= max_jobs:
             print(f"🛑 Limite MAX_JOBS={max_jobs} atingido. Jobs reivindicados: {claimed}", flush=True)
             break
@@ -168,11 +203,17 @@ def run_loop(runner: Runner, claim_fn, mode: str, max_jobs: int, stop: threading
                 if mode == "once" and runner.active == 0:
                     print(f"⏳ Nenhum job disponível. Reivindicados: {claimed}", flush=True)
                     break
-                stop.wait(idle_sleep)
+                idle_polls += 1
+                stop.wait(jittered(idle_sleep))
             continue
         claimed += 1
         runner.submit(job)
     return claimed
+
+
+def jittered(base: float, jitter: float | None = None) -> float:
+    j = IDLE_JITTER if jitter is None else jitter
+    return max(0.0, base * (1 + random.uniform(-j, j)))
 
 
 def idle_forever():
@@ -181,7 +222,7 @@ def idle_forever():
 
 
 def main():
-    print(f"🚀 Fábrica Video Worker v11 | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
+    print(f"🚀 Fábrica Video Worker v17 | WORKER_ID={metrics.WORKER_ID} | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
           f"WORKER_CONCURRENCY={CONCURRENCY} | HEAVY_CONCURRENCY={HEAVY_CONCURRENCY} | "
           f"FFMPEG_THREADS={FFMPEG_THREADS} | MIN_FREE_MEM_MB={MIN_FREE_MEM_MB:.0f} | HEAVY_MIN_FREE_MEM_MB={HEAVY_MIN_FREE_MEM_MB:.0f} | "
           f"CACHE={'on' if cache.CACHE_ENABLED else 'off'} {cache.CACHE_DIR} max={cache.CACHE_MAX_MB:.0f}MB",

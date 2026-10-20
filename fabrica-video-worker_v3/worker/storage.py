@@ -12,7 +12,7 @@ import requests
 from worker import cache, metrics
 from worker.gateway import GatewayUnavailable, storage_url
 
-UA = {"User-Agent": "fabrica-video-worker/1.3"}
+UA = {"User-Agent": "fabrica-video-worker/1.5"}
 ATTEMPTS = 4
 TRANSIENT = {408, 429, 500, 502, 503, 504}
 

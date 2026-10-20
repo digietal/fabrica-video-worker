@@ -217,7 +217,9 @@ class CacheTests(unittest.TestCase):
 
     def test_uncacheable_kinds_and_refs(self):
         self.assertIsNone(cache.key_for({"storage_path": "x", "kind": "NORMALIZE"}))  # sem artifact_id
-        self.assertIsNone(cache.key_for(dict(self.ref(), kind="RENDER_CLEAN")))
+        # v15: renders finais passaram a ser cacheáveis (THUMBNAIL/ZIP reutilizam o arquivo local).
+        self.assertIsNotNone(cache.key_for(dict(self.ref(), kind="RENDER_CLEAN")))
+        self.assertIsNone(cache.key_for(dict(self.ref(), kind="ZIP")))  # ZIP continua fora do cache
 
     def test_hit_survives_eviction(self):
         ref = self.ref("evict")

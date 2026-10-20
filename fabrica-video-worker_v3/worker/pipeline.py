@@ -2,8 +2,8 @@
 import tempfile
 from pathlib import Path
 
-from worker import ffmpeg, matting, storage
-from worker.contracts import require_input, require_list
+from worker import baseprep, fastpath, ffmpeg, matting, storage
+from worker.contracts import require_input, require_list, require_ref
 from worker.gateway import complete_job
 
 # Parâmetros de TRIM definidos em src/lib/factory/produce.ts (cache_key do TRIM).
@@ -27,10 +27,10 @@ def process_mix(job):
     out_path = f"{storage.run_dir(paths[0])}/mix/{ugc}.mp4"
     with tempfile.TemporaryDirectory(prefix=f"fabrica_mix_{job['id']}_") as tmp:
         parts = [storage.download(sp, Path(tmp) / f"{i}_{k}.mp4") for i, (k, sp) in enumerate(zip(keys, paths))]
-        out = ffmpeg.concat(parts, Path(tmp) / "mix.mp4")
+        out, fp = ffmpeg.concat_fast(parts, Path(tmp) / "mix.mp4")
         meta = ffmpeg.probe(out)
         storage.upload(out, out_path, "video/mp4")
-    return _complete(job, "MIX", out_path, {**meta, "ugc_hash": ugc, "ugc_code": p.get("ugc_code")})
+    return _complete(job, "MIX", out_path, {**meta, "pipeline": fp, "ugc_hash": ugc, "ugc_code": p.get("ugc_code")})
 
 
 def process_trim(job):
@@ -39,10 +39,10 @@ def process_trim(job):
     out_path = f"{storage.run_dir(mix)}/trim/{p['ugc_hash']}.mp4"
     with tempfile.TemporaryDirectory(prefix=f"fabrica_trim_{job['id']}_") as tmp:
         src = storage.download(mix, Path(tmp) / "mix.mp4")
-        out = ffmpeg.trim_silence(src, Path(tmp) / "trim.mp4", TRIM_SILENCE_DB, TRIM_MIN_PAUSE_MS)
+        out, fp = ffmpeg.trim_fast(src, Path(tmp) / "trim.mp4", TRIM_SILENCE_DB, TRIM_MIN_PAUSE_MS)
         meta = ffmpeg.probe(out)
         storage.upload(out, out_path, "video/mp4")
-    return _complete(job, "TRIM", out_path, {**meta, "ugc_hash": p["ugc_hash"],
+    return _complete(job, "TRIM", out_path, {**meta, "pipeline": fp, "ugc_hash": p["ugc_hash"],
                                              "silence_db": TRIM_SILENCE_DB, "min_pause_ms": TRIM_MIN_PAUSE_MS})
 
 
@@ -86,12 +86,13 @@ def process_ugc_matte(job):
     mix = require_input(job, "mix")
     out_path = f"{storage.run_dir(mix)}/matte/ugc/{ugc}.mp4"
     with tempfile.TemporaryDirectory(prefix=f"fabrica_umatte_{job['id']}_") as tmp:
-        keep = ffmpeg.silence_keep(storage.download(mix, Path(tmp) / "mix.mp4"), TRIM_SILENCE_DB, TRIM_MIN_PAUSE_MS)
+        mix_local = storage.download(mix, Path(tmp) / "mix.mp4")
+        keep = ffmpeg.silence_keep(mix_local, TRIM_SILENCE_DB, TRIM_MIN_PAUSE_MS)
         parts = [storage.download(sp, Path(tmp) / f"{i}_{k}.mp4") for i, (k, sp) in enumerate(zip(keys, paths))]
-        out = ffmpeg.ugc_matte(parts, keep, Path(tmp) / "ugc_matte.mp4")
+        out, fp = ffmpeg.ugc_matte_fast(parts, keep, mix_local, Path(tmp) / "ugc_matte.mp4")
         meta = ffmpeg.probe(out)
         storage.upload(out, out_path, "video/mp4")
-    return _complete(job, "UGC_MATTE", out_path, {**meta, "ugc_hash": ugc, "segments": len(keep),
+    return _complete(job, "UGC_MATTE", out_path, {**meta, "pipeline": fp, "ugc_hash": ugc, "segments": len(keep),
                                                  "source_mattes": paths})
 
 
@@ -110,19 +111,54 @@ def _render(job, kind, build):
 
 
 def process_render_clean(job):
+    """v15 (D): com FAST_PIPELINE=1, se o artifact do TRIM já está no formato final, o LIMPO REUTILIZA
+    o próprio artifact do TRIM (result.artifact_id) — sem download, sem remux, sem upload, sem novo
+    arquivo no Storage. O job RENDER_CLEAN continua existindo e conclui normalmente; /complete liga
+    production_items.artifact_id ao artifact do TRIM (mesmo owner + mesma produção, validado no Gateway).
+    Qualquer dúvida (sem artifact_id, formato diferente, falha de leitura) -> caminho legado."""
+    if fastpath.enabled():
+        try:
+            ref = require_ref(job, "trim")
+            if ref and ref.get("artifact_id"):
+                with tempfile.TemporaryDirectory(prefix=f"fabrica_clean_{job['id']}_") as tmp:
+                    local = storage.download(ref["storage_path"], Path(tmp) / "trim.mp4")
+                    meta = ffmpeg.probe(local)
+                if ffmpeg.matches_final(meta):
+                    fastpath.record("RENDER_CLEAN", "reuse_trim", None, 0)
+                    return complete_job(job["id"], {"artifact_id": ref["artifact_id"],
+                                                    "metadata": {**meta, "pipeline": {"fast_pipeline": True,
+                                                                                      "method": "reuse_trim",
+                                                                                      "reencodes": 0}}})
+                fastpath.record("RENDER_CLEAN", "legacy", "TRIM fora do formato final", 1)
+        except Exception as e:
+            fastpath.record("RENDER_CLEAN", "legacy", f"{type(e).__name__}: {str(e)[:200]}", 1)
     return _render(job, "RENDER_CLEAN", lambda tmp, ugc, out: ffmpeg.render_clean(ugc, out))
 
 
 def process_render_split(job):
     base = require_input(job, "base")
-    return _render(job, "RENDER_SPLIT", lambda tmp, ugc, out: ffmpeg.render_split(
-        ugc, storage.download(base, tmp / "base.mp4"), out))
+    ref = require_ref(job, "base")
+
+    def build(tmp, ugc, out):
+        prepared = baseprep.prepared_base(ref, "SPLIT", storage.download) if ref else None
+        # Com Base preparada, o arquivo bruto não é mais necessário neste render (1 download a menos).
+        raw = None if prepared else storage.download(base, tmp / "base.mp4")
+        return ffmpeg.render_split(ugc, raw or prepared, out, prepared=prepared)
+
+    return _render(job, "RENDER_SPLIT", build)
 
 
 def process_render_react(job):
     base, matte = require_input(job, "base"), require_input(job, "matte")
-    return _render(job, "RENDER_REACT", lambda tmp, ugc, out: ffmpeg.render_react(
-        storage.download(base, tmp / "base.mp4"), storage.download(matte, tmp / "matte.mp4"), ugc, out))
+    ref = require_ref(job, "base")
+
+    def build(tmp, ugc, out):
+        prepared = baseprep.prepared_base(ref, "REACT", storage.download) if ref else None
+        raw = None if prepared else storage.download(base, tmp / "base.mp4")
+        return ffmpeg.render_react(raw or prepared, storage.download(matte, tmp / "matte.mp4"), ugc, out,
+                                   prepared=prepared)
+
+    return _render(job, "RENDER_REACT", build)
 
 
 def process_thumbnail(job):

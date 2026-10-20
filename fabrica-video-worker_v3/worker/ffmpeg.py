@@ -4,7 +4,14 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import os
+
 from worker.config import FFMPEG_THREADS
+
+
+def render_opt() -> bool:
+    """v16: grafos de TELA DIVIDIDA/REACT enxutos (RENDER_OPT=1). Padrão 0 = grafo v15 idêntico."""
+    return os.getenv("RENDER_OPT", "0").strip() == "1"
 
 W, H, FPS = 1080, 1920, 30
 T = str(FFMPEG_THREADS)
@@ -52,9 +59,16 @@ def _fit(label_in: str, label_out: str, w: int = W, h: int = H) -> str:
             f"setsar=1[{label_out}]")
 
 
-def normalize(src: Path, out: Path) -> Path:
-    """1080x1920, 30fps, H.264, AAC 48kHz estéreo, MP4. Gera silêncio se não houver áudio."""
-    if has_audio(src):
+def normalize(src: Path, out: Path, edge: tuple[float, float] | None = None) -> Path:
+    """1080x1920, 30fps, H.264, AAC 48kHz estéreo, MP4. Gera silêncio se não houver áudio.
+    edge=(início, fim) (só FAST_PIPELINE): decupa as bordas na MESMA codificação (sem custo extra).
+    Vídeo e áudio recebem exatamente a mesma janela (trim/atrim) -> sincronia preservada."""
+    if has_audio(src) and edge:
+        a, b = edge
+        fc = (f"[0:v]trim={a:.3f}:{b:.3f},setpts=PTS-STARTPTS[t];" + _fit("t", "v") +
+              f";[0:a]atrim={a:.3f}:{b:.3f},asetpts=PTS-STARTPTS[a]")
+        cmd = ["ffmpeg", "-y", "-i", str(src), *FT, "-filter_complex", fc, "-map", "[v]", "-map", "[a]"]
+    elif has_audio(src):
         cmd = ["ffmpeg", "-y", "-i", str(src), *FT, "-filter_complex", _fit("0:v", "v"), "-map", "[v]", "-map", "0:a:0"]
     else:
         cmd = ["ffmpeg", "-y", "-i", str(src), "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
@@ -123,7 +137,7 @@ def ugc_matte(mattes: list[Path], keep: list[tuple[float, float]], out: Path) ->
     return out
 
 
-def _matches_final(meta: dict) -> bool:
+def matches_final(meta: dict) -> bool:
     """True quando o arquivo já está exatamente no formato final (saída do TRIM): 1080x1920, 30fps, H.264, AAC 48k estéreo."""
     return (meta.get("width") == W and meta.get("height") == H and meta.get("video_codec") == "h264"
             and meta.get("fps") is not None and abs(meta["fps"] - FPS) < 0.01 and meta.get("audio_codec") == "aac"
@@ -132,7 +146,7 @@ def _matches_final(meta: dict) -> bool:
 
 def render_clean(ugc: Path, out: Path) -> Path:
     """LIMPO = UGC após TRIM. v11: se o TRIM já está no formato final, copia os streams (sem recodificar)."""
-    if _matches_final(probe(ugc)):
+    if matches_final(probe(ugc)):
         _run(["ffmpeg", "-y", "-i", str(ugc), "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
               "-movflags", "+faststart", str(out)], out)
         return out
@@ -149,42 +163,64 @@ def _enc_audio_copy(ugc: Path) -> list[str]:
     return ENC
 
 
-def render_split(ugc: Path, base: Path, out: Path) -> Path:
-    """SPLIT_50_50 (v12): Base em cima (1080x960, cover+crop), Avatar/UGC embaixo (1080x960).
+def render_split(ugc: Path, base: Path, out: Path, prepared: Path | None = None) -> Path:
+    """SPLIT_50_50 (v14): Base em cima (1080x960, cover+crop), Avatar/UGC embaixo (1080x960).
     O avatar NÃO é cortado: escala proporcional pela altura (contain) centralizada, com preenchimento
     lateral feito pelo próprio UGC desfocado (sem deformar, sem cortar olhos/testa/queixo).
-    Áudio só do UGC, duração do UGC."""
+    Áudio só do UGC, duração do UGC.
+    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x960/30fps — o grafo pula scale/crop da Base."""
     hh = H // 2
-    fc = (f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[top];"
-          f"[0:v]fps={FPS},setsar=1,split=2[uf][ub];"
-          f"[ub]scale={W // 4}:{hh // 4}:force_original_aspect_ratio=increase,crop={W // 4}:{hh // 4},"
-          f"boxblur=8:2,scale={W}:{hh},setsar=1[ubg];"
-          f"[uf]scale={W}:{hh}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[ufg];"
-          f"[ubg][ufg]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[bot];"
+    # v14: avatar volta a ocupar a largura toda (tamanho antigo, sem faixas laterais); o corte
+    # vertical fica ancorado perto do topo (15%) para preservar cabeça/olhos.
+    top = f"[1:v]fps={FPS},setsar=1[top]" if prepared else \
+        f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[top]"
+    opt = render_opt()
+    if opt and not prepared:
+        # v16: fps ANTES do scale (Base 60 fps não escala quadros que serão descartados; saída igual).
+        top = f"[1:v]fps={FPS},scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1[top]"
+    fc = (top + ";"
+          f"[0:v]fps={FPS},scale={W}:{hh}:force_original_aspect_ratio=increase,"
+          f"crop={W}:{hh}:(iw-{W})/2:(ih-{hh})*0.15,setsar=1,format=yuv420p[bot];"
           f"[top][bot]vstack=inputs=2:shortest=1[v]")
-    _run(["ffmpeg", "-y", "-i", str(ugc), "-stream_loop", "-1", "-i", str(base), *FT, "-filter_complex", fc,
-          "-map", "[v]", "-map", "0:a:0", "-shortest"] + _enc_audio_copy(ugc) + [str(out)], out)
+    D = ["-threads", T] if opt else []  # v16: decoders limitados (menos RAM com 2 entradas 1080p)
+    _run(["ffmpeg", "-y", *D, "-i", str(ugc), *D, "-stream_loop", "-1", "-i", str(prepared or base), *FT,
+          "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-shortest"] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
 
 
-def render_react(base: Path, mask: Path, ugc: Path, out: Path) -> Path:
+def render_react(base: Path, mask: Path, ugc: Path, out: Path, prepared: Path | None = None) -> Path:
     """REACT_DEFAULT: Base ocupa o canvas 1080x1920; Creator (UGC TRIM) recortado pelo matte real do
     BACKGROUND_REMOVE no canto inferior direito, 60% da largura; áudio só do UGC.
     Composição via maskedmerge em yuv420p (sem RGBA/alphamerge/overlay): Creator e máscara recebem o
     MESMO scale/crop/pad para 1080x1920; fundo da máscara preto (= Base). A máscara é montada em
-    yuv420p com Y em resolução cheia e U/V em meia resolução derivados da mesma máscara."""
+    yuv420p com Y em resolução cheia e U/V em meia resolução derivados da mesma máscara.
+    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x1920/30fps — o grafo pula scale/crop da Base."""
     cw, ch = int(W * 0.6) // 2 * 2, int(H * 0.6) // 2 * 2
     # Canto inferior direito com margem segura (valores pares p/ yuv420p).
     m = 24
     x, y = max(0, W - cw - m) // 2 * 2, max(0, H - ch - m) // 2 * 2
     fit = f"fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},setsar=1"
     pad = f"pad={W}:{H}:{x}:{y}:color=black"
-    fc = (_fit("0:v", "b0") + ";[b0]format=yuv420p[bg];"
-          f"[2:v]{fit},format=yuv420p,{pad}[fg];"
-          f"[1:v]{fit},format=gray,{pad},split=2[my][mc];"
-          f"[mc]scale={W // 2}:{H // 2}:flags=bilinear,split=2[mu][mv];"
-          "[my][mu][mv]mergeplanes=0x001020:yuv420p[m];"
-          "[bg][fg][m]maskedmerge[v]")
+    bg = f"[0:v]fps={FPS},setsar=1,format=yuv420p[bg]" if prepared else _fit("0:v", "b0") + ";[b0]format=yuv420p[bg]"
+    if render_opt():
+        # v16: maskedmerge só na região do Creator (cw x ch) em vez do quadro 1080x1920 inteiro;
+        # fora dela a máscara era 0 (= Base). Sem pad em tela cheia; overlay opaco yuv420p (sem RGBA).
+        bg = bg[:-4] + ",split=2[bg][bgc]"
+        fc = (bg + ";"
+              f"[bgc]crop={cw}:{ch}:{x}:{y}[bgr];"
+              f"[2:v]{fit},format=yuv420p[fg];"
+              f"[1:v]{fit},format=gray,split=2[my][mc];"
+              f"[mc]scale={cw // 2}:{ch // 2}:flags=bilinear,split=2[mu][mv];"
+              "[my][mu][mv]mergeplanes=0x001020:yuv420p[m];"
+              "[bgr][fg][m]maskedmerge[comp];"
+              f"[bg][comp]overlay=x={x}:y={y}:shortest=1:eof_action=endall:format=yuv420[v]")
+    else:
+        fc = (bg + ";"
+              f"[2:v]{fit},format=yuv420p,{pad}[fg];"
+              f"[1:v]{fit},format=gray,{pad},split=2[my][mc];"
+              f"[mc]scale={W // 2}:{H // 2}:flags=bilinear,split=2[mu][mv];"
+              "[my][mu][mv]mergeplanes=0x001020:yuv420p[m];"
+              "[bg][fg][m]maskedmerge[v]")
     # Decoders limitados (sem isso cada entrada abre 1 thread/frame por núcleo do host -> pico de RAM).
     D = ["-threads", T]
     _run(["ffmpeg", "-y", *D, "-stream_loop", "-1", "-i", str(base), *D, "-i", str(mask), *D, "-i", str(ugc),
@@ -212,3 +248,78 @@ def run_ffmpeg(input_path: str, output_path: str):
     """Compatibilidade com a versão anterior."""
     render_clean(Path(input_path), Path(output_path))
     return output_path
+
+
+# ---------------- FAST_PIPELINE (Fase 1) ----------------
+# Cada função devolve (arquivo, relatório). Com a flag desligada ou qualquer condição insegura, executa
+# exatamente o método legado acima.
+
+def _legacy(out: Path, reason: str | None):
+    for extra in (out, out.with_suffix(".concat.txt")):
+        extra.unlink(missing_ok=True)
+    return reason
+
+
+def normalize_fast(src: Path, out: Path, silence_db: float, min_pause_ms: int):
+    from worker import fastpath
+    if not fastpath.enabled():
+        return normalize(src, out), {"method": "legacy", "reencodes": 1}
+    edge, reason = None, None
+    try:
+        if has_audio(src):
+            edge = fastpath.edge_window(silence_keep(src, silence_db, min_pause_ms), probe(src)["duration"], min_pause_ms)
+    except Exception as e:  # análise de silêncio falhou -> sem decupagem de borda
+        reason = f"edge: {e}"[:300]
+    normalize(src, out, edge)
+    return out, fastpath.record("NORMALIZE", "edge_trim" if edge else "legacy", reason, 1,
+                                edge_window=list(edge) if edge else None)
+
+
+def concat_fast(parts: list[Path], out: Path):
+    from worker import fastpath
+    reason = "FAST_PIPELINE=0"
+    if fastpath.enabled():
+        try:
+            rep = fastpath.concat_copy(parts, out, need_audio=True)
+            return out, fastpath.record("MIX", "concat_copy", None, 0, parts=len(parts), **rep)
+        except Exception as e:
+            reason = _legacy(out, f"{type(e).__name__}: {e}"[:300])
+    concat(parts, out)
+    return out, (fastpath.record("MIX", "legacy", reason, 1, parts=len(parts)) if fastpath.enabled()
+                 else {"method": "legacy", "reencodes": 1})
+
+
+def trim_fast(src: Path, out: Path, silence_db: float, min_pause_ms: int):
+    from worker import fastpath
+    reason = "FAST_PIPELINE=0"
+    if fastpath.enabled():
+        try:
+            keep = silence_keep(src, silence_db, min_pause_ms)
+            if not fastpath.is_full(keep, probe(src)["duration"]):
+                raise fastpath.Incompatible(f"TRIM cortaria {len(keep)} trecho(s)")
+            rep = fastpath.copy_file(src, out, need_audio=True)
+            return out, fastpath.record("TRIM", "copy_no_cuts", None, 0, **rep)
+        except Exception as e:
+            reason = _legacy(out, f"{type(e).__name__}: {e}"[:300])
+    trim_silence(src, out, silence_db, min_pause_ms)
+    return out, (fastpath.record("TRIM", "legacy", reason, 1) if fastpath.enabled() else {"method": "legacy", "reencodes": 1})
+
+
+def ugc_matte_fast(mattes: list[Path], keep: list[tuple[float, float]], mix: Path, out: Path):
+    """Concat por cópia das máscaras SÓ quando o TRIM não corta nada (TRIM = MIX) e a contagem de frames da
+    máscara bate exatamente com a do vídeo usado pelo REACT."""
+    from worker import fastpath
+    reason = "FAST_PIPELINE=0"
+    if fastpath.enabled():
+        try:
+            if not fastpath.is_full(keep, probe(mix)["duration"]):
+                raise fastpath.Incompatible(f"TRIM corta {len(keep)} trecho(s): máscara precisa dos mesmos cortes")
+            rep = fastpath.concat_copy(mattes, out, need_audio=False)
+            target = fastpath.frame_count(mix)
+            if rep["frames"] != target:
+                raise fastpath.Incompatible(f"máscara {rep['frames']} frames ≠ vídeo {target}")
+            return out, fastpath.record("UGC_MATTE", "concat_copy", None, 0, video_frames=target, **rep)
+        except Exception as e:
+            reason = _legacy(out, f"{type(e).__name__}: {e}"[:300])
+    ugc_matte(mattes, keep, out)
+    return out, (fastpath.record("UGC_MATTE", "legacy", reason, 1) if fastpath.enabled() else {"method": "legacy", "reencodes": 1})
