@@ -66,10 +66,11 @@ def process_asset_matte(job):
     if not asset_id:
         raise RuntimeError(f"ASSET_MATTE {job['id']} sem asset_id")
     norm = require_input(job, "normalized")
+    dilate = max(0, int(p.get("matte_expand") or 0))  # v18: expansão da máscara (mãos/produtos)
     out_path = f"{storage.run_dir(norm)}/matte/assets/{asset_id}.mp4"
     with tempfile.TemporaryDirectory(prefix=f"fabrica_amatte_{job['id']}_") as tmp:
         src = storage.download(norm, Path(tmp) / "norm.mp4")
-        out, info = matting.remove_background(src, Path(tmp) / "matte.mp4", label="ASSET_MATTE")
+        out, info = matting.remove_background(src, Path(tmp) / "matte.mp4", label="ASSET_MATTE", dilate_px=dilate)
         meta = ffmpeg.probe(out)
         storage.upload(out, out_path, "video/mp4")
     return _complete(job, "ASSET_MATTE", out_path, {**meta, **info, "asset_id": asset_id, "asset_kind": p.get("kind")})
@@ -138,12 +139,13 @@ def process_render_clean(job):
 def process_render_split(job):
     base = require_input(job, "base")
     ref = require_ref(job, "base")
+    style = ((job.get("payload") or {}).get("split_style") or "EXPAND").upper()  # v18
 
     def build(tmp, ugc, out):
         prepared = baseprep.prepared_base(ref, "SPLIT", storage.download) if ref else None
         # Com Base preparada, o arquivo bruto não é mais necessário neste render (1 download a menos).
         raw = None if prepared else storage.download(base, tmp / "base.mp4")
-        return ffmpeg.render_split(ugc, raw or prepared, out, prepared=prepared)
+        return ffmpeg.render_split(ugc, raw or prepared, out, prepared=prepared, style=style)
 
     return _render(job, "RENDER_SPLIT", build)
 
@@ -151,14 +153,52 @@ def process_render_split(job):
 def process_render_react(job):
     base, matte = require_input(job, "base"), require_input(job, "matte")
     ref = require_ref(job, "base")
+    p = job.get("payload") or {}
+    # v18: margem inferior configurável; sem o campo (produções antigas) mantém 24px.
+    margin = int(p["react_bottom_margin"]) if p.get("react_bottom_margin") is not None else 24
 
     def build(tmp, ugc, out):
         prepared = baseprep.prepared_base(ref, "REACT", storage.download) if ref else None
         raw = None if prepared else storage.download(base, tmp / "base.mp4")
         return ffmpeg.render_react(raw or prepared, storage.download(matte, tmp / "matte.mp4"), ugc, out,
-                                   prepared=prepared)
+                                   prepared=prepared, bottom_margin=margin)
 
     return _render(job, "RENDER_REACT", build)
+
+
+PREVIEW_SECONDS = 4.0  # v18: trecho curto, MESMO pipeline do render final
+
+
+def process_preview(job):
+    """PREVIEW (v18): trecho de ~4s de UM UGC em um formato (SPLIT/REACT), para aprovação visual
+    antes da produção completa. Não tem production_item_id nem toca em production_items;
+    o artifact kind='PREVIEW' é lido pela tela da produção."""
+    p = job.get("payload") or {}
+    fmt = (p.get("format") or "").upper()
+    if fmt not in ("SPLIT", "REACT"):
+        raise RuntimeError(f"PREVIEW {job['id']} com formato inválido: {fmt!r}")
+    trim = require_input(job, "trim")
+    base = require_input(job, "base")
+    code = p.get("creative_code") or f"PREVIEW-{fmt}"
+    out_path = f"{storage.run_dir(trim)}/previews/{code}_{job['id'][:8]}.mp4"
+    with tempfile.TemporaryDirectory(prefix=f"fabrica_preview_{job['id']}_") as tmp:
+        ugc = storage.download(trim, Path(tmp) / "trim.mp4")
+        raw_base = storage.download(base, Path(tmp) / "base.mp4")
+        out = Path(tmp) / "preview.mp4"
+        if fmt == "SPLIT":
+            ffmpeg.render_split(ugc, raw_base, out, style=(p.get("split_style") or "EXPAND").upper(),
+                                max_dur=PREVIEW_SECONDS)
+        else:
+            matte = require_input(job, "matte")
+            margin = int(p["react_bottom_margin"]) if p.get("react_bottom_margin") is not None else 24
+            ffmpeg.render_react(raw_base, storage.download(matte, Path(tmp) / "matte.mp4"), ugc, out,
+                                bottom_margin=margin, max_dur=PREVIEW_SECONDS)
+        meta = ffmpeg.probe(out)
+        storage.upload(out, out_path, "video/mp4")
+    return _complete(job, "PREVIEW", out_path, {**meta, "creative_code": code, "format": fmt,
+                                                "preview": True, "seconds": PREVIEW_SECONDS,
+                                                "split_style": p.get("split_style"),
+                                                "react_bottom_margin": p.get("react_bottom_margin")})
 
 
 def process_thumbnail(job):

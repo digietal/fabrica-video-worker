@@ -222,7 +222,7 @@ def idle_forever():
 
 
 def main():
-    print(f"🚀 Fábrica Video Worker v17 | WORKER_ID={metrics.WORKER_ID} | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
+    print(f"🚀 Fábrica Video Worker v18 | WORKER_ID={metrics.WORKER_ID} | WORKER_MODE={WORKER_MODE} | MAX_JOBS={MAX_JOBS} | "
           f"WORKER_CONCURRENCY={CONCURRENCY} | HEAVY_CONCURRENCY={HEAVY_CONCURRENCY} | "
           f"FFMPEG_THREADS={FFMPEG_THREADS} | MIN_FREE_MEM_MB={MIN_FREE_MEM_MB:.0f} | HEAVY_MIN_FREE_MEM_MB={HEAVY_MIN_FREE_MEM_MB:.0f} | "
           f"CACHE={'on' if cache.CACHE_ENABLED else 'off'} {cache.CACHE_DIR} max={cache.CACHE_MAX_MB:.0f}MB",

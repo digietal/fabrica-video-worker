@@ -15,7 +15,20 @@ from worker.config import BG_DOWNSAMPLE, BG_MIN_COVERAGE, BG_PROVIDER, BG_WIDTH,
 FPS = 30
 
 
-def remove_background(src: Path, out: Path, label: str = "BACKGROUND_REMOVE") -> tuple[Path, dict]:
+def _dilate(alpha, px: int):
+    """v18: dilatação morfológica da máscara (vizinhança 8, 1px por iteração, NumPy puro).
+    Preserva dedos, mãos, embalagens e produtos que o RVM corta nas bordas. px=0 desliga."""
+    import numpy as np
+    a = alpha
+    for _ in range(max(0, int(px))):
+        p = np.pad(a, 1, mode="edge")
+        a = np.maximum.reduce([p[:-2, :-2], p[:-2, 1:-1], p[:-2, 2:],
+                               p[1:-1, :-2], p[1:-1, 1:-1], p[1:-1, 2:],
+                               p[2:, :-2], p[2:, 1:-1], p[2:, 2:]])
+    return a
+
+
+def remove_background(src: Path, out: Path, label: str = "BACKGROUND_REMOVE", dilate_px: int = 0) -> tuple[Path, dict]:
     if BG_PROVIDER != "rvm":
         raise RuntimeError(f"{label}: BG_PROVIDER='{BG_PROVIDER}' não suportado (use 'rvm').")
     if not Path(RVM_MODEL_PATH).exists():
@@ -56,6 +69,8 @@ def remove_background(src: Path, out: Path, label: str = "BACKGROUND_REMOVE") ->
                                        "downsample_ratio": ds})
                 pha = outs[1][0, 0]
                 rec = outs[2:6]
+                if dilate_px > 0:
+                    pha = _dilate(pha, dilate_px)
                 cov = float(pha.mean())
                 coverage_sum += cov
                 max_cov = max(max_cov, cov)
@@ -83,4 +98,5 @@ def remove_background(src: Path, out: Path, label: str = "BACKGROUND_REMOVE") ->
     if not out.exists() or out.stat().st_size == 0:
         raise RuntimeError(f"{label}: matte não foi gerado.")
     return out, {"provider": "rvm_mobilenetv3", "matte_width": w, "matte_height": h, "frames": frames,
-                 "mean_coverage": round(coverage_sum / frames, 4), "downsample_ratio": BG_DOWNSAMPLE}
+                 "mean_coverage": round(coverage_sum / frames, 4), "downsample_ratio": BG_DOWNSAMPLE,
+                 "dilate_px": int(dilate_px)}

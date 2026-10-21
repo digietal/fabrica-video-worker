@@ -163,43 +163,55 @@ def _enc_audio_copy(ugc: Path) -> list[str]:
     return ENC
 
 
-def render_split(ugc: Path, base: Path, out: Path, prepared: Path | None = None) -> Path:
-    """SPLIT_50_50 (v14): Base em cima (1080x960, cover+crop), Avatar/UGC embaixo (1080x960).
-    O avatar NÃO é cortado: escala proporcional pela altura (contain) centralizada, com preenchimento
-    lateral feito pelo próprio UGC desfocado (sem deformar, sem cortar olhos/testa/queixo).
-    Áudio só do UGC, duração do UGC.
-    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x960/30fps — o grafo pula scale/crop da Base."""
+def render_split(ugc: Path, base: Path, out: Path, prepared: Path | None = None,
+                 style: str = "EXPAND", max_dur: float | None = None) -> Path:
+    """SPLIT_50_50: Base em cima (1080x960, cover+crop), Avatar/UGC embaixo (1080x960).
+    v18 — dois estilos visuais para a metade inferior (sem deformar, áudio só do UGC, duração do UGC):
+    - EXPAND (padrão, visual v14): avatar ocupa a largura toda (cover), corte vertical ancorado
+      perto do topo (15%) para preservar cabeça/olhos.
+    - BLUR (visual v12): avatar em contain (nada é cortado) centralizado, laterais preenchidas
+      com o próprio UGC desfocado.
+    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x960/30fps — o grafo pula scale/crop da Base.
+    v18: `max_dur` limita a duração da saída (prévias curtas com o MESMO pipeline)."""
     hh = H // 2
-    # v14: avatar volta a ocupar a largura toda (tamanho antigo, sem faixas laterais); o corte
-    # vertical fica ancorado perto do topo (15%) para preservar cabeça/olhos.
     top = f"[1:v]fps={FPS},setsar=1[top]" if prepared else \
         f"[1:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS}[top]"
     opt = render_opt()
     if opt and not prepared:
         # v16: fps ANTES do scale (Base 60 fps não escala quadros que serão descartados; saída igual).
         top = f"[1:v]fps={FPS},scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1[top]"
-    fc = (top + ";"
-          f"[0:v]fps={FPS},scale={W}:{hh}:force_original_aspect_ratio=increase,"
-          f"crop={W}:{hh}:(iw-{W})/2:(ih-{hh})*0.15,setsar=1,format=yuv420p[bot];"
-          f"[top][bot]vstack=inputs=2:shortest=1[v]")
+    if style == "BLUR":
+        bot = (f"[0:v]fps={FPS},split=2[fa][fb];"
+               f"[fa]scale={W}:{hh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+               f"[fb]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},gblur=sigma=24,setsar=1[bgf];"
+               f"[bgf][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[bot]")
+    else:  # EXPAND (padrão)
+        bot = (f"[0:v]fps={FPS},scale={W}:{hh}:force_original_aspect_ratio=increase,"
+               f"crop={W}:{hh}:(iw-{W})/2:(ih-{hh})*0.15,setsar=1,format=yuv420p[bot]")
+    fc = top + ";" + bot + f";[top][bot]vstack=inputs=2:shortest=1[v]"
     D = ["-threads", T] if opt else []  # v16: decoders limitados (menos RAM com 2 entradas 1080p)
+    limit = ["-t", f"{max_dur:.3f}"] if max_dur else []
     _run(["ffmpeg", "-y", *D, "-i", str(ugc), *D, "-stream_loop", "-1", "-i", str(prepared or base), *FT,
-          "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-shortest"] + _enc_audio_copy(ugc) + [str(out)], out)
+          "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-shortest", *limit] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
 
 
-def render_react(base: Path, mask: Path, ugc: Path, out: Path, prepared: Path | None = None) -> Path:
+def render_react(base: Path, mask: Path, ugc: Path, out: Path, prepared: Path | None = None,
+                 bottom_margin: int = 24, max_dur: float | None = None) -> Path:
     """REACT_DEFAULT: Base ocupa o canvas 1080x1920; Creator (UGC TRIM) recortado pelo matte real do
     BACKGROUND_REMOVE no canto inferior direito, 60% da largura; áudio só do UGC.
     Composição via maskedmerge em yuv420p (sem RGBA/alphamerge/overlay): Creator e máscara recebem o
     MESMO scale/crop/pad para 1080x1920; fundo da máscara preto (= Base). A máscara é montada em
     yuv420p com Y em resolução cheia e U/V em meia resolução derivados da mesma máscara.
-    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x1920/30fps — o grafo pula scale/crop da Base."""
+    v15: `prepared` (BASE_PREP) é a Base JÁ em 1080x1920/30fps — o grafo pula scale/crop da Base.
+    v18: `bottom_margin` configurável por produção (padrão 24 = comportamento antigo; 0 = avatar
+    encostado na borda inferior). O recorte do Creator é ancorado no TOPO (crop y=0) para nunca
+    cortar cabeça/olhos quando a proporção difere. `max_dur` limita a duração (prévias)."""
     cw, ch = int(W * 0.6) // 2 * 2, int(H * 0.6) // 2 * 2
-    # Canto inferior direito com margem segura (valores pares p/ yuv420p).
-    m = 24
+    # Canto inferior direito com margem inferior configurável (valores pares p/ yuv420p).
+    m = max(0, int(bottom_margin))
     x, y = max(0, W - cw - m) // 2 * 2, max(0, H - ch - m) // 2 * 2
-    fit = f"fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},setsar=1"
+    fit = f"fps={FPS},scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch}:(iw-{cw})/2:0,setsar=1"
     pad = f"pad={W}:{H}:{x}:{y}:color=black"
     bg = f"[0:v]fps={FPS},setsar=1,format=yuv420p[bg]" if prepared else _fit("0:v", "b0") + ";[b0]format=yuv420p[bg]"
     if render_opt():
@@ -223,9 +235,10 @@ def render_react(base: Path, mask: Path, ugc: Path, out: Path, prepared: Path | 
               "[bg][fg][m]maskedmerge[v]")
     # Decoders limitados (sem isso cada entrada abre 1 thread/frame por núcleo do host -> pico de RAM).
     D = ["-threads", T]
+    limit = ["-t", f"{max_dur:.3f}"] if max_dur else []
     _run(["ffmpeg", "-y", *D, "-stream_loop", "-1", "-i", str(base), *D, "-i", str(mask), *D, "-i", str(ugc),
           *FT, "-filter_complex", fc, "-map", "[v]", "-map", "2:a:0", "-shortest",
-          "-max_muxing_queue_size", "1024"] + _enc_audio_copy(ugc) + [str(out)], out)
+          "-max_muxing_queue_size", "1024", *limit] + _enc_audio_copy(ugc) + [str(out)], out)
     return out
 
 

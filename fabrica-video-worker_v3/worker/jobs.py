@@ -17,6 +17,7 @@ HANDLERS = {
     "RENDER_REACT": pipeline.process_render_react,
     "THUMBNAIL": pipeline.process_thumbnail,
     "ZIP": pipeline.process_zip,
+    "PREVIEW": pipeline.process_preview,
 }
 
 
