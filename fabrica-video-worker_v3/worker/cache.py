@@ -30,8 +30,11 @@ CACHE_DIR = Path(os.getenv("CACHE_DIR", "/tmp/fabrica-cache"))
 CACHE_MAX_MB = float(os.getenv("CACHE_MAX_MB", "3000"))
 CACHE_TTL_HOURS = float(os.getenv("CACHE_TTL_HOURS", "12"))
 # Tipos de artifact imutáveis que valem a pena guardar (Bases normalizadas, TRIM, mattes, etc.).
+# v15 (I/J): renders finais também entram — THUMBNAIL e ZIP consomem o render logo em seguida e
+# passam a pegar o arquivo já em disco (hardlink) em vez de baixar de novo (até ~300 downloads a menos).
 CACHEABLE_KINDS = set(os.getenv(
-    "CACHE_KINDS", "NORMALIZE,TRIM,ASSET_MATTE,UGC_MATTE,BACKGROUND_REMOVE,VOICE_CONVERT,MIX").split(","))
+    "CACHE_KINDS", "NORMALIZE,TRIM,ASSET_MATTE,UGC_MATTE,BACKGROUND_REMOVE,VOICE_CONVERT,MIX,"
+                   "RENDER_CLEAN,RENDER_SPLIT,RENDER_REACT").split(","))
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()

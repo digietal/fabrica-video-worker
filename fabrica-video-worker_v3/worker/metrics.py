@@ -3,6 +3,12 @@ import json
 import os
 import threading
 import time
+import socket
+import uuid
+
+# v17: identidade do Worker na frota (vários contêineres independentes).
+HOST = socket.gethostname()
+WORKER_ID = os.getenv("WORKER_ID") or os.getenv("RAILWAY_REPLICA_ID") or f"{HOST}-{uuid.uuid4().hex[:6]}"
 
 _local = threading.local()
 
@@ -81,5 +87,18 @@ def cpu() -> dict:
 
 
 def log(event: str, **fields):
-    rec = {"event": event, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **fields}
+    rec = {"event": event, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "worker_id": WORKER_ID, **fields}
     print("📊 " + json.dumps(rec, ensure_ascii=False, default=str), flush=True)
+
+
+def queue_wait_s(job: dict, now: float | None = None):
+    """v17: segundos entre a criação do job e o início no Worker (None se created_at ausente/ inválido)."""
+    from datetime import datetime
+    raw = (job or {}).get("created_at")
+    if not raw:
+        return None
+    try:
+        t = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return round(max(0.0, (now or time.time()) - t), 1)

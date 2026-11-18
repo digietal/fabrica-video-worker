@@ -10,6 +10,12 @@ class GatewayContractGap(RuntimeError):
     pass
 
 
+def require_ref(job: dict, key: str) -> dict | None:
+    """Referência completa do artifact de dependência ({storage_path, artifact_id, cache_key, kind, ...})."""
+    value = ((job.get("payload") or {}).get("inputs") or {}).get(key)
+    return value if isinstance(value, dict) else None
+
+
 def require_input(job: dict, key: str, optional: bool = False) -> str | None:
     inputs = (job.get("payload") or {}).get("inputs") or {}
     value = inputs.get(key)
